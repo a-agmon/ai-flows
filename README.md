@@ -20,6 +20,10 @@ There are no edges to wire by hand: data moves only through shared state.
 
 ## Quick start
 
+> New here? **[QUICKSTART.md](QUICKSTART.md)** is a step-by-step walkthrough:
+> install, run, call the built-in flows, and author your own. The block below is
+> the short version.
+
 ```bash
 uv venv && source .venv/bin/activate
 uv pip install fastapi "uvicorn[standard]" pydantic pydantic-settings structlog \
@@ -195,8 +199,10 @@ tests/               unit + API + end-to-end tests
 
 ## Notes & v1 scope
 
-- Bad configs fail **startup**, not requests.
-- `when` is handled inside node functions; only `end_if` alters graph topology
-  (via a hidden router node), keeping the builder simple.
+- Bad configs fail **startup**, not requests (duplicate ids/routes, missing
+  prompt files or modules, prompt paths escaping the prompts dir, etc.).
+- `when` never alters topology: a node-level `when` is checked inside the node
+  function, a stage-level `when` in the stage's entry node. Only `end_if` adds a
+  hidden router node, keeping the builder simple.
 - Not in v1: arbitrary conditional edges, loops, persistence, streaming,
   per-node retries, runtime-uploaded modules.
