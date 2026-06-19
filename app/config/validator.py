@@ -14,8 +14,7 @@ from app.config.models import (
     ModuleNodeConfig,
 )
 from app.errors import ConfigError
-from app.graph.nodes import import_module_function
-from app.settings import settings
+from app.graph.nodes import import_module_function, resolve_prompt_path
 
 
 def validate_flow(config: FlowConfig) -> None:
@@ -51,15 +50,9 @@ def _check_unique_node_ids(config: FlowConfig) -> None:
 def _check_resources_exist(config: FlowConfig) -> None:
     for _, node in config.iter_nodes():
         if isinstance(node, LLMNodeConfig) and node.prompt_file is not None:
-            prompts_dir = settings.prompts_dir.resolve()
-            path = (settings.prompts_dir / node.prompt_file).resolve()
-            # Reject prompt_file values that escape the prompts directory.
-            if prompts_dir not in path.parents:
-                _fail(
-                    config,
-                    f"node '{node.id}' references prompt_file "
-                    f"'{node.prompt_file}' outside the prompts directory",
-                )
+            # Resolves and rejects path traversal, raising ConfigError if it
+            # escapes the prompts directory.
+            path = resolve_prompt_path(node.id, node.prompt_file)
             if not path.is_file():
                 _fail(
                     config,
