@@ -20,6 +20,7 @@ from app.settings import settings
 
 def validate_flow(config: FlowConfig) -> None:
     """Validate a single flow. Raises ConfigError on the first problem."""
+    _check_unique_stage_ids(config)
     _check_unique_node_ids(config)
     _check_resources_exist(config)
     _check_outputs_are_producible(config)
@@ -27,6 +28,16 @@ def validate_flow(config: FlowConfig) -> None:
 
 def _fail(config: FlowConfig, message: str) -> None:
     raise ConfigError(f"flow '{config.id}': {message}")
+
+
+def _check_unique_stage_ids(config: FlowConfig) -> None:
+    # Stage ids name the hidden entry/router nodes in the graph, so duplicates
+    # would otherwise surface as a cryptic "node already exists" error at build.
+    seen: set[str] = set()
+    for stage in config.stages:
+        if stage.id in seen:
+            _fail(config, f"duplicate stage id '{stage.id}'")
+        seen.add(stage.id)
 
 
 def _check_unique_node_ids(config: FlowConfig) -> None:
@@ -40,7 +51,15 @@ def _check_unique_node_ids(config: FlowConfig) -> None:
 def _check_resources_exist(config: FlowConfig) -> None:
     for _, node in config.iter_nodes():
         if isinstance(node, LLMNodeConfig) and node.prompt_file is not None:
-            path = settings.prompts_dir / node.prompt_file
+            prompts_dir = settings.prompts_dir.resolve()
+            path = (settings.prompts_dir / node.prompt_file).resolve()
+            # Reject prompt_file values that escape the prompts directory.
+            if prompts_dir not in path.parents:
+                _fail(
+                    config,
+                    f"node '{node.id}' references prompt_file "
+                    f"'{node.prompt_file}' outside the prompts directory",
+                )
             if not path.is_file():
                 _fail(
                     config,

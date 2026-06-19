@@ -129,8 +129,13 @@ def _build_inner(node: NodeConfig) -> NodeFn:
     raise ConfigError(f"unsupported node type: {node.type}")  # pragma: no cover
 
 
-def create_node_fn(node: NodeConfig) -> NodeFn:
-    """Build the wrapped, runnable node function for a node config."""
+def create_node_fn(node: NodeConfig, *, stage_skip_key: str | None = None) -> NodeFn:
+    """Build the wrapped, runnable node function for a node config.
+
+    ``stage_skip_key`` is the state key the stage's entry node sets when the
+    stage's ``when`` guard is false; if present and truthy the node is skipped,
+    just as it is when the node's own ``when`` guard is false.
+    """
     inner = _build_inner(node)
 
     @functools.wraps(inner)
@@ -140,7 +145,9 @@ def create_node_fn(node: NodeConfig) -> NodeFn:
         run_id = state.get("_run_id")
         agent_id = state.get("_agent_id")
 
-        if node.when is not None and not evaluate_condition(node.when, state):
+        stage_skipped = bool(stage_skip_key and state.get(stage_skip_key))
+        node_skipped = node.when is not None and not evaluate_condition(node.when, state)
+        if stage_skipped or node_skipped:
             logger.info(
                 "node skipped",
                 run_id=run_id, agent_id=agent_id,

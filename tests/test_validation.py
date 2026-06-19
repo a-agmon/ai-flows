@@ -83,3 +83,29 @@ def test_duplicate_route_rejected_by_registry():
     reg.register(a, build_graph(a))
     with pytest.raises(ConfigError, match="duplicate route"):
         reg.register(b, build_graph(b))
+
+
+def test_duplicate_stage_ids_fail_validation():
+    flow = _flow(
+        stages=[
+            {"id": "dup", "nodes": [_module_node("n1")]},
+            {"id": "dup", "nodes": [_module_node("n2")]},
+        ]
+    )
+    with pytest.raises(ConfigError, match="duplicate stage id"):
+        validate_flow(flow)
+
+
+def test_prompt_file_must_stay_inside_prompts_dir():
+    flow = _flow(
+        outputs=["text"],
+        stages=[{
+            "id": "s",
+            "nodes": [{
+                "id": "n", "type": "llm", "model": "m",
+                "prompt_file": "../settings.py", "output_key": "text",
+            }],
+        }],
+    )
+    with pytest.raises(ConfigError, match="outside the prompts directory"):
+        validate_flow(flow)

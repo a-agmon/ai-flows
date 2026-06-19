@@ -3,7 +3,7 @@
 Topology
 --------
 The public schema is stage-based. Each stage is given a hidden *entry* node that
-fans out to the stage's real nodes:
+evaluates the stage's ``when`` guard and then leads to the stage's real nodes:
 
     START -> entry(s1) -> [nodes of s1] -> entry(s2) -> [nodes of s2] -> ... -> END
 
@@ -17,8 +17,9 @@ conditional edges cannot fan out to a list of nodes.
 
 Early termination (``end_if``) adds a hidden *router* node after a stage whose
 conditional edges go either to ``END`` or to the next stage's entry. Stages
-without ``end_if`` are wired with plain edges. ``when`` is handled inside the
-node functions (see ``nodes.py``) and never changes the topology here.
+without ``end_if`` are wired with plain edges. A stage-level ``when`` is
+evaluated in the entry node and recorded as a skip flag; node-level ``when`` is
+handled inside the node functions (see ``nodes.py``). Neither changes topology.
 """
 
 from __future__ import annotations
@@ -33,18 +34,36 @@ from app.graph.nodes import create_node_fn
 from app.graph.state import STATE_KEY, FlowState
 
 
-async def _passthrough(graph_state: dict[str, Any]) -> dict[str, Any]:
-    """A hidden entry node: contributes nothing, just provides a join point."""
-    return {STATE_KEY: {}}
+def _stage_skip_key(stage: StageConfig) -> str:
+    """Internal state key recording whether a stage was skipped by its ``when``."""
+    return f"_stage_skipped_{stage.id}"
+
+
+def _make_entry(stage: StageConfig):
+    """Return the hidden entry node for a stage.
+
+    It evaluates the stage's ``when`` guard (if any) and records the result so
+    that the stage's nodes and ``end_if`` router can honour the skip.
+    """
+
+    async def entry(graph_state: dict[str, Any]) -> dict[str, Any]:
+        skipped = False
+        if stage.when is not None:
+            skipped = not evaluate_condition(stage.when, graph_state[STATE_KEY])
+        return {STATE_KEY: {_stage_skip_key(stage): skipped}}
+
+    return entry
 
 
 def _make_router(stage: StageConfig):
     """Return ``(router_node_fn, route_fn)`` for a stage that has ``end_if``."""
     condition = stage.end_if
+    skip_key = _stage_skip_key(stage)
 
     async def router_node(graph_state: dict[str, Any]) -> dict[str, Any]:
         state = graph_state[STATE_KEY]
-        if evaluate_condition(condition, state):
+        # A skipped stage must not fire its end_if router.
+        if not state.get(skip_key) and evaluate_condition(condition, state):
             return {STATE_KEY: {"_flow_status": "ended",
                                "_completion_reason": condition.reason}}
         return {STATE_KEY: {}}
@@ -67,11 +86,12 @@ def build_graph(config: FlowConfig):
 
     for stage in config.stages:
         entry_id = f"__entry_{stage.id}"
-        graph.add_node(entry_id, _passthrough)
+        graph.add_node(entry_id, _make_entry(stage))
 
         node_ids: list[str] = []
+        skip_key = _stage_skip_key(stage)
         for node in stage.nodes:
-            graph.add_node(node.id, create_node_fn(node))
+            graph.add_node(node.id, create_node_fn(node, stage_skip_key=skip_key))
             node_ids.append(node.id)
 
         _connect(graph, exit_, entry_id)
