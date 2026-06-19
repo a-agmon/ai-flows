@@ -1,0 +1,45 @@
+id: ocr_summary
+name: OCR Summary
+route: /agents/ocr-summary
+
+description: >
+  Extracts text from a document via OCR, then summarizes it.
+
+inputs:
+  file_url:
+    type: string
+    required: true
+  max_words:
+    type: integer
+    required: false
+    default: 80
+
+outputs:
+  - extracted_text
+  - summary
+
+stages:
+  - id: ocr
+    parallel: false
+    nodes:
+      - id: run_ocr
+        type: module
+        module: ocr
+        function: extract_text
+        output_key: extracted_text
+        inputs:
+          file_url: file_url
+
+  - id: summarize
+    parallel: false
+    nodes:
+      - id: summarize_text
+        type: llm
+        model: gpt-4.1-mini
+        temperature: 0.2
+        output_key: summary
+        prompt: |
+          Summarize the following document in at most {{ max_words }} words.
+
+          Document:
+          {{ extracted_text }}
