@@ -1,0 +1,75 @@
+# Flow used by tests/test_e2e.py. Uses inline prompts (no prompt files) and a
+# scripted/mock LLM so the whole flow can run end to end without a real model.
+id: e2e_letter
+name: E2E Letter
+route: /agents/e2e-letter
+
+inputs:
+  user_request:
+    type: string
+    required: true
+  tone:
+    type: string
+    required: false
+    default: professional
+
+outputs:
+  - final_letter
+  - request_status
+  - rejection_reason
+
+stages:
+  # Sequential: the classifier produces `classification`, then `unpack` reads it.
+  - id: classify
+    parallel: false
+    nodes:
+      - id: classify_request
+        type: llm
+        model: fake-model
+        prompt: |
+          Classify request:
+          {{ user_request }}
+        output_key: classification
+
+      - id: unpack
+        type: module
+        module: transforms
+        function: unpack_classification
+        merge_output: true
+        inputs:
+          classification: classification
+
+    end_if:
+      field: request_status
+      equals: unsupported
+      reason: unsupported_request
+
+  # Parallel: the two sections are independent.
+  - id: draft
+    parallel: true
+    nodes:
+      - id: write_intro
+        type: llm
+        model: fake-model
+        prompt: |
+          Write the intro for {{ user_request }} in a {{ tone }} tone.
+        output_key: intro_text
+
+      - id: write_closing
+        type: llm
+        model: fake-model
+        prompt: |
+          Write the closing for {{ user_request }}.
+        output_key: closing_text
+
+  - id: assemble
+    parallel: false
+    nodes:
+      - id: assemble_letter
+        type: module
+        module: transforms
+        function: assemble_letter
+        inputs:
+          intro: intro_text
+          closing: closing_text
+        output_key: final_letter

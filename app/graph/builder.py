@@ -7,10 +7,13 @@ fans out to the stage's real nodes:
 
     START -> entry(s1) -> [nodes of s1] -> entry(s2) -> [nodes of s2] -> ... -> END
 
-Nodes within a stage share the entry node as their sole predecessor, so
-LangGraph runs them concurrently (fan-out); the next stage's entry waits for all
-of them (join). The entry node exists so that conditional routing always targets
-a single node -- LangGraph's conditional edges cannot fan out to a list of nodes.
+In a ``parallel: true`` stage the nodes share the entry node as their sole
+predecessor, so LangGraph runs them concurrently (fan-out) and the next stage's
+entry waits for all of them (join). In a ``parallel: false`` stage the nodes are
+chained entry -> n1 -> n2 -> ... so each sees the previous node's output (e.g. a
+producer node followed by one that reads what it wrote). The entry node also
+ensures conditional routing always targets a single node -- LangGraph's
+conditional edges cannot fan out to a list of nodes.
 
 Early termination (``end_if``) adds a hidden *router* node after a stage whose
 conditional edges go either to ``END`` or to the next stage's entry. Stages
@@ -69,20 +72,35 @@ def build_graph(config: FlowConfig):
         node_ids: list[str] = []
         for node in stage.nodes:
             graph.add_node(node.id, create_node_fn(node))
-            graph.add_edge(entry_id, node.id)
             node_ids.append(node.id)
 
         _connect(graph, exit_, entry_id)
+
+        # Wire the nodes within the stage according to ``parallel``.
+        if stage.parallel:
+            # Fan out: all nodes run concurrently from the entry; the next
+            # stage joins on all of them.
+            for node_id in node_ids:
+                graph.add_edge(entry_id, node_id)
+            leaf_node_ids = node_ids
+        else:
+            # Sequential: chain the nodes so each sees the previous one's
+            # output (e.g. a producer node followed by a node that reads it).
+            prev_node = entry_id
+            for node_id in node_ids:
+                graph.add_edge(prev_node, node_id)
+                prev_node = node_id
+            leaf_node_ids = [node_ids[-1]]
 
         if stage.end_if is not None:
             router_id = f"__router_{stage.id}"
             router_node, route_fn = _make_router(stage)
             graph.add_node(router_id, router_node)
-            for node_id in node_ids:
+            for node_id in leaf_node_ids:
                 graph.add_edge(node_id, router_id)
             exit_ = ("router", router_id, route_fn)
         else:
-            exit_ = ("plain", node_ids)
+            exit_ = ("plain", leaf_node_ids)
 
     _connect(graph, exit_, END)
     return graph.compile()

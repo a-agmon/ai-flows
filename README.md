@@ -11,7 +11,7 @@ and edit them.
 YAML defines stages.
 Stages contain nodes.
 Nodes read and write a shared state dict.
-Nodes in a stage run in parallel; the next stage sees everything written before it.
+Nodes in a stage run in parallel (or in order with `parallel: false`); the next stage sees everything written before it.
 A node or stage can be skipped with `when`.
 A flow can end early with `end_if`.
 ```
@@ -28,12 +28,18 @@ cp .env.example .env        # then set OPENAI_API_KEY
 uvicorn app.main:app --reload
 ```
 
-Run the tests (no API key required — they use module-only flows):
+Run the tests (no API key required):
 
 ```bash
 uv pip install pytest pytest-asyncio httpx
 pytest
 ```
+
+The suite includes true end-to-end tests ([`tests/test_e2e.py`](tests/test_e2e.py))
+that read a flow from a YAML file, compile it, and run it through both the runner
+and the HTTP endpoint. LLM nodes are mocked by injecting a scripted stub through
+the LLM factory seam (`app.graph.nodes.create_llm`), so flows containing LLM
+nodes run deterministically with no model or API key.
 
 ## HTTP API
 
@@ -83,7 +89,7 @@ inputs:
 outputs: [final_text]       # keys returned to the caller (if present)
 stages:
   - id: draft
-    parallel: true          # informational; nodes in a stage always run together
+    parallel: true          # true = nodes run concurrently; false = in order
     nodes:
       - id: write
         type: llm
@@ -183,7 +189,8 @@ app/
   modules/           user-defined module-node functions
   prompts/           Jinja2 prompt templates
 configs/             flow YAML files
-tests/               unit + API tests
+tests/               unit + API + end-to-end tests
+  configs/           YAML flow used by the e2e tests
 ```
 
 ## Notes & v1 scope

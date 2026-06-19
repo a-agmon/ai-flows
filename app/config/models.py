@@ -120,7 +120,12 @@ NodeConfig = Annotated[
 
 
 class StageConfig(_Strict):
-    """An ordered group of nodes. All nodes in a stage run together."""
+    """An ordered group of nodes.
+
+    With ``parallel: true`` (default) the nodes run concurrently; with
+    ``parallel: false`` they run in declared order, each seeing the previous
+    node's output. The next stage always sees everything this stage wrote.
+    """
 
     id: str
     parallel: bool = True
