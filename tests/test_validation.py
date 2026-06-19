@@ -34,38 +34,59 @@ def _flow(**overrides):
 
 def test_unknown_field_is_rejected():
     with pytest.raises(Exception):
-        FlowConfig.model_validate(
-            {"id": "f", "route": "/x", "stages": [], "bogus": 1}
-        )
+        FlowConfig.model_validate({"id": "f", "route": "/x", "stages": [], "bogus": 1})
 
 
 def test_missing_prompt_file_fails_validation():
     flow = _flow(
         outputs=["text"],
-        stages=[{
-            "id": "s",
-            "nodes": [{
-                "id": "n", "type": "llm", "model": "m",
-                "prompt_file": "does_not_exist.md", "output_key": "text",
-            }],
-        }],
+        stages=[
+            {
+                "id": "s",
+                "nodes": [
+                    {
+                        "id": "n",
+                        "type": "llm",
+                        "model": "m",
+                        "prompt_file": "does_not_exist.md",
+                        "output_key": "text",
+                    }
+                ],
+            }
+        ],
     )
     with pytest.raises(ConfigError, match="does not exist"):
         validate_flow(flow)
 
 
 def test_unknown_module_function_fails_validation():
-    flow = _flow(stages=[{"id": "s", "nodes": [{
-        "id": "n", "type": "module", "module": "ocr",
-        "function": "no_such_fn", "output_key": "out",
-        "inputs": {"file_url": "file_url"},
-    }]}])
+    flow = _flow(
+        stages=[
+            {
+                "id": "s",
+                "nodes": [
+                    {
+                        "id": "n",
+                        "type": "module",
+                        "module": "ocr",
+                        "function": "no_such_fn",
+                        "output_key": "out",
+                        "inputs": {"file_url": "file_url"},
+                    }
+                ],
+            }
+        ]
+    )
     with pytest.raises(ConfigError, match="no callable"):
         validate_flow(flow)
 
 
 def test_duplicate_node_ids_fail_validation():
-    flow = _flow(stages=[{"id": "s", "nodes": [_module_node("dup"), _module_node("dup", "out2")]}])
+    flow = _flow(
+        stages=[
+            {"id": "s", "nodes": [_module_node("dup"), _module_node("dup", "out2")]}
+        ]
+    )
     with pytest.raises(ConfigError, match="duplicate node id"):
         validate_flow(flow)
 
@@ -83,3 +104,36 @@ def test_duplicate_route_rejected_by_registry():
     reg.register(a, build_graph(a))
     with pytest.raises(ConfigError, match="duplicate route"):
         reg.register(b, build_graph(b))
+
+
+def test_prompt_file_must_stay_inside_prompts_dir():
+    flow = _flow(
+        outputs=["text"],
+        stages=[
+            {
+                "id": "s",
+                "nodes": [
+                    {
+                        "id": "n",
+                        "type": "llm",
+                        "model": "m",
+                        "prompt_file": "../settings.py",
+                        "output_key": "text",
+                    }
+                ],
+            }
+        ],
+    )
+    with pytest.raises(ConfigError, match="outside the prompts directory"):
+        validate_flow(flow)
+
+
+def test_duplicate_stage_ids_fail_validation():
+    flow = _flow(
+        stages=[
+            {"id": "dup", "nodes": [_module_node("n1")]},
+            {"id": "dup", "nodes": [_module_node("n2")]},
+        ]
+    )
+    with pytest.raises(ConfigError, match="duplicate stage id"):
+        validate_flow(flow)

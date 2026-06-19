@@ -129,7 +129,7 @@ def _build_inner(node: NodeConfig) -> NodeFn:
     raise ConfigError(f"unsupported node type: {node.type}")  # pragma: no cover
 
 
-def create_node_fn(node: NodeConfig) -> NodeFn:
+def create_node_fn(node: NodeConfig, *, stage_skip_key: str | None = None) -> NodeFn:
     """Build the wrapped, runnable node function for a node config."""
     inner = _build_inner(node)
 
@@ -140,11 +140,18 @@ def create_node_fn(node: NodeConfig) -> NodeFn:
         run_id = state.get("_run_id")
         agent_id = state.get("_agent_id")
 
+        should_skip = bool(stage_skip_key and state.get(stage_skip_key))
         if node.when is not None and not evaluate_condition(node.when, state):
+            should_skip = True
+
+        if should_skip:
             logger.info(
                 "node skipped",
-                run_id=run_id, agent_id=agent_id,
-                node_id=node.id, node_type=node.type, status="skipped",
+                run_id=run_id,
+                agent_id=agent_id,
+                node_id=node.id,
+                node_type=node.type,
+                status="skipped",
             )
             return {STATE_KEY: {}}
 
@@ -164,8 +171,9 @@ def create_node_fn(node: NodeConfig) -> NodeFn:
     return wrapped
 
 
-def _log_node(run_id, agent_id, node: NodeConfig, start: float,
-              status: str, error: str | None) -> None:
+def _log_node(
+    run_id, agent_id, node: NodeConfig, start: float, status: str, error: str | None
+) -> None:
     logger.info(
         "node executed",
         run_id=run_id,

@@ -139,3 +139,52 @@ async def test_missing_required_input_rejected():
     entry = _build()
     with pytest.raises(InputValidationError):
         await run_flow(entry, {"file_url": "doc://1"})  # no classification
+
+
+async def test_stage_when_skips_all_nodes_and_continues():
+    flow = FLOW.copy()
+    flow["stages"] = [
+        {
+            "id": "skipped_stage",
+            "when": {"field": "run_optional", "equals": True},
+            "nodes": [
+                {
+                    "id": "skipped_stage_node",
+                    "type": "module",
+                    "module": "ocr",
+                    "function": "extract_text",
+                    "output_key": "a",
+                    "inputs": {"file_url": "file_url"},
+                }
+            ],
+            "end_if": {
+                "field": "request_status",
+                "exists": False,
+                "reason": "would_end_if_stage_ran",
+            },
+        },
+        {
+            "id": "next_stage",
+            "nodes": [
+                {
+                    "id": "next_node",
+                    "type": "module",
+                    "module": "ocr",
+                    "function": "extract_text",
+                    "output_key": "b",
+                    "inputs": {"file_url": "file_url"},
+                }
+            ],
+        },
+    ]
+    flow["outputs"] = ["a", "b"]
+
+    config = FlowConfig.model_validate(flow)
+    validate_flow(config)
+    entry = RegisteredFlow(config=config, graph=build_graph(config), version="test")
+
+    result = await run_flow(entry, {"file_url": "doc://1", "classification": "{}"})
+
+    assert result["status"] == "completed"
+    assert "a" not in result["output"]
+    assert result["output"]["b"] == "[extracted text from doc://1]"
