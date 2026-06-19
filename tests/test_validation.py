@@ -107,5 +107,6 @@ def test_prompt_file_must_stay_inside_prompts_dir():
             }],
         }],
     )
-    with pytest.raises(ConfigError, match="outside the prompts directory"):
+    # The error names the flow (via _fail), like every other validation error.
+    with pytest.raises(ConfigError, match=r"flow 'f'.*outside the prompts directory"):
         validate_flow(flow)

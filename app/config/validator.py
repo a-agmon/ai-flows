@@ -8,6 +8,8 @@ Anything invalid raises :class:`ConfigError` and fails startup.
 
 from __future__ import annotations
 
+from typing import NoReturn
+
 from app.config.models import (
     FlowConfig,
     LLMNodeConfig,
@@ -25,7 +27,7 @@ def validate_flow(config: FlowConfig) -> None:
     _check_outputs_are_producible(config)
 
 
-def _fail(config: FlowConfig, message: str) -> None:
+def _fail(config: FlowConfig, message: str) -> NoReturn:
     raise ConfigError(f"flow '{config.id}': {message}")
 
 
@@ -48,11 +50,15 @@ def _check_unique_node_ids(config: FlowConfig) -> None:
 
 
 def _check_resources_exist(config: FlowConfig) -> None:
+    # The shared helpers raise bare ConfigErrors (no flow context); re-raise them
+    # through ``_fail`` so every validation error consistently names the flow.
     for _, node in config.iter_nodes():
         if isinstance(node, LLMNodeConfig) and node.prompt_file is not None:
-            # Resolves and rejects path traversal, raising ConfigError if it
-            # escapes the prompts directory.
-            path = resolve_prompt_path(node.id, node.prompt_file)
+            try:
+                # Resolves and rejects path traversal outside the prompts dir.
+                path = resolve_prompt_path(node.id, node.prompt_file)
+            except ConfigError as exc:
+                _fail(config, str(exc))
             if not path.is_file():
                 _fail(
                     config,
@@ -60,8 +66,10 @@ def _check_resources_exist(config: FlowConfig) -> None:
                     f"'{node.prompt_file}' but {path} does not exist",
                 )
         elif isinstance(node, ModuleNodeConfig):
-            # Raises ConfigError if the module/function cannot be imported.
-            import_module_function(node.module, node.function)
+            try:
+                import_module_function(node.module, node.function)
+            except ConfigError as exc:
+                _fail(config, str(exc))
 
 
 def _check_outputs_are_producible(config: FlowConfig) -> None:
