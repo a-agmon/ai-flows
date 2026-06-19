@@ -13,6 +13,7 @@ import functools
 import importlib
 import inspect
 import time
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import jinja2
@@ -39,17 +40,26 @@ def render_template(template_text: str, state: dict[str, Any]) -> str:
     return _jinja_env.from_string(template_text).render(**state)
 
 
+def resolve_prompt_path(node_id: str, prompt_file: str) -> Path:
+    """Resolve ``prompt_file`` against the prompts dir, rejecting path traversal.
+
+    Shared by the loader (to read the template) and the validator (to check it
+    exists) so the traversal guard lives in exactly one place.
+    """
+    prompts_dir = settings.prompts_dir.resolve()
+    path = (settings.prompts_dir / prompt_file).resolve()
+    if prompts_dir not in path.parents:
+        raise ConfigError(
+            f"node '{node_id}': prompt_file '{prompt_file}' is outside the prompts directory"
+        )
+    return path
+
+
 def _load_prompt_text(node: LLMNodeConfig) -> str:
     """Return the prompt template text for an LLM node (inline or from file)."""
     if node.prompt is not None:
         return node.prompt
-    path = (settings.prompts_dir / node.prompt_file).resolve()
-    # Guard against path traversal via a crafted ``prompt_file``.
-    if settings.prompts_dir.resolve() not in path.parents:
-        raise ConfigError(
-            f"node '{node.id}': prompt_file '{node.prompt_file}' escapes the prompts directory"
-        )
-    return path.read_text(encoding="utf-8")
+    return resolve_prompt_path(node.id, node.prompt_file).read_text(encoding="utf-8")
 
 
 def import_module_function(module: str, function: str) -> Callable[..., Any]:
