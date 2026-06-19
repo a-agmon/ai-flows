@@ -1,120 +1,80 @@
 id: letter_generation
-name: Letter Generation
+name: Hospital Discharge Letter
 route: /agents/letter-generation
 
 description: >
-  Classifies an incoming customer request, rejects unsupported ones early,
-  then drafts a letter from independently generated sections and polishes it.
+  Generates three paragraphs of a hospital discharge letter in parallel from a
+  single discharge brief, merges them into one letter with an LLM, then runs a
+  guardrail check over the result.
 
 inputs:
-  user_request:
-    type: string
+  discharge:
+    type: object
     required: true
-  tone:
-    type: string
-    required: false
-    default: professional
-  include_legal_disclaimer:
-    type: boolean
-    required: false
-    default: false
+    # Shape:
+    # {
+    #   "patient_name": "Jane Doe",
+    #   "admission": { "date": "2026-06-10", "reason": "..." },
+    #   "diagnosis": "...",
+    #   "hospital_course": "...",
+    #   "medications": ["..."],
+    #   "follow_up": ["..."],
+    #   "attending_physician": "Dr. ..."
+    # }
 
 outputs:
   - final_letter
-  - request_status
-  - rejection_reason
+  - guardrail_passed
+  - guardrail_issues
 
 stages:
-  # 1. Decide whether we can handle the request; stop early if not.
-  - id: classify
-    parallel: false
-    nodes:
-      - id: classify_request
-        type: llm
-        model: gpt-4.1-mini
-        temperature: 0
-        output_key: classification
-        prompt: |
-          Decide whether this customer request can be handled by a support
-          letter. Return ONLY JSON of the form:
-          {"request_status": "supported" | "unsupported", "rejection_reason": string | null}
-
-          Request:
-          {{ user_request }}
-
-      - id: unpack_classification
-        type: module
-        module: transforms
-        function: unpack_classification
-        merge_output: true
-        inputs:
-          classification: classification
-
-    end_if:
-      field: request_status
-      equals: unsupported
-      reason: unsupported_request
-
-  # 2. Draft the three sections in parallel.
-  - id: generate_letter_parts
+  # 1. Three paragraphs, generated concurrently. Same input (discharge),
+  #    each node reads a DIFFERENT key out of it and writes a DISTINCT key.
+  - id: write_paragraphs
     parallel: true
     nodes:
-      - id: write_intro
+      - id: write_summary
         type: llm
         model: gpt-4.1-mini
         temperature: 0.2
-        prompt_file: letter_intro.md
-        output_key: intro_text
+        prompt_file: discharge/summary.md
+        output_key: summary_text
 
-      - id: write_body
+      - id: write_treatment
         type: llm
         model: gpt-4.1-mini
         temperature: 0.2
-        prompt_file: letter_body.md
-        output_key: body_text
+        prompt_file: discharge/treatment.md
+        output_key: treatment_text
 
-      - id: write_closing
+      - id: write_followup
         type: llm
         model: gpt-4.1-mini
         temperature: 0.2
-        prompt_file: letter_closing.md
-        output_key: closing_text
+        prompt_file: discharge/followup.md
+        output_key: followup_text
 
-  # 3. Join the sections into a single draft.
-  - id: assemble
+  # 2. Merge the three paragraphs into one letter (also an LLM). By now
+  #    summary_text, treatment_text and followup_text are all in state — the
+  #    parallel join merged them — so this single prompt can read all three.
+  - id: merge_letter
     parallel: false
     nodes:
-      - id: assemble_letter
+      - id: merge_paragraphs
+        type: llm
+        model: gpt-4.1-mini
+        temperature: 0.1
+        prompt_file: discharge/merge.md
+        output_key: final_letter
+
+  # 3. Guardrail: a deterministic Python check over the finished letter.
+  - id: guardrail
+    parallel: false
+    nodes:
+      - id: check_letter
         type: module
         module: transforms
-        function: assemble_letter
-        output_key: draft_letter
+        function: guardrail_check
+        merge_output: true            # returns {guardrail_passed, guardrail_issues}
         inputs:
-          intro: intro_text
-          policy: body_text
-          closing: closing_text
-
-  # 4. Optionally generate a legal disclaimer (skipped unless requested).
-  - id: legal
-    parallel: false
-    nodes:
-      - id: add_legal_disclaimer
-        type: llm
-        model: gpt-4.1-mini
-        temperature: 0.1
-        prompt_file: legal_disclaimer.md
-        output_key: legal_disclaimer
-        when:
-          field: include_legal_disclaimer
-          equals: true
-
-  # 5. Polish the final letter.
-  - id: polish
-    parallel: false
-    nodes:
-      - id: polish_letter
-        type: llm
-        model: gpt-4.1-mini
-        temperature: 0.1
-        prompt_file: polish.md
-        output_key: final_letter
+          letter: final_letter

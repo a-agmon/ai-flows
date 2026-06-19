@@ -15,6 +15,25 @@ async def assemble_letter(inputs: dict, state: dict, config: dict) -> str:
     return "\n\n".join(parts)
 
 
+async def guardrail_check(inputs: dict, state: dict, config: dict) -> dict:
+    """Deterministic safety checks over the finished discharge letter.
+
+    Returns two state keys (hence ``merge_output: true`` on the node): a boolean
+    pass/fail and the list of issues found, so downstream consumers or the API
+    response can react without re-running the model.
+    """
+    letter = inputs["letter"] or ""
+    issues: list[str] = []
+    if len(letter.strip()) < 100:
+        issues.append("letter is suspiciously short")
+    if "{{" in letter or "}}" in letter:
+        issues.append("unrendered template markers left in output")
+    patient_name = state.get("discharge", {}).get("patient_name")
+    if patient_name and patient_name not in letter:
+        issues.append("patient name is missing from the letter")
+    return {"guardrail_passed": not issues, "guardrail_issues": issues}
+
+
 async def unpack_classification(inputs: dict, state: dict, config: dict) -> dict:
     """Parse the classifier's JSON output into individual state fields.
 
