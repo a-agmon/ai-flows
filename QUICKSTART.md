@@ -49,8 +49,11 @@ curl localhost:8000/health
 # {"status":"ok"}
 
 curl localhost:8000/agents
-# lists the built-in flows: letter_generation, ocr_summary
+# lists the built-in flows: letter_generation, ocr_summary, support_reply
 ```
+
+`support_reply` is the fullest example flow (folder-nested prompts, a logging
+module, parallel + sequential stages, `when` and `end_if`) — a good one to read.
 
 ## 5. Call a built-in flow
 

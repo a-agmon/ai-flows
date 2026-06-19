@@ -76,33 +76,34 @@ async def run_flow(
     config = entry.config
     run_id = str(uuid.uuid4())
     initial_state = build_initial_state(config, payload, run_id)
-
     start = time.perf_counter()
-    logger.info(
-        "run started",
-        run_id=run_id, agent_id=config.id, version=entry.version,
-    )
 
-    final_state: dict[str, Any] = unwrap(await entry.graph.ainvoke(wrap(initial_state)))
+    # Bind run context for the whole run. asyncio copies contextvars into the
+    # tasks LangGraph spawns per node, so node and module logs inherit run_id and
+    # agent_id automatically (the merge_contextvars processor renders them).
+    with structlog.contextvars.bound_contextvars(run_id=run_id, agent_id=config.id):
+        logger.info("run started", version=entry.version)
 
-    ended = final_state.get("_flow_status") == "ended"
-    response: dict[str, Any] = {
-        "agent_id": config.id,
-        "run_id": run_id,
-        "status": "ended" if ended else "completed",
-        "completion_reason": (
-            final_state.get("_completion_reason") if ended else "end_reached"
-        ),
-        "output": _extract_outputs(config, final_state),
-    }
-    if include_state:
-        response["state"] = _public_state(final_state)
+        final_state: dict[str, Any] = unwrap(
+            await entry.graph.ainvoke(wrap(initial_state))
+        )
 
-    logger.info(
-        "run finished",
-        run_id=run_id,
-        agent_id=config.id,
-        status=response["status"],
-        duration_ms=round((time.perf_counter() - start) * 1000, 2),
-    )
-    return response
+        ended = final_state.get("_flow_status") == "ended"
+        response: dict[str, Any] = {
+            "agent_id": config.id,
+            "run_id": run_id,
+            "status": "ended" if ended else "completed",
+            "completion_reason": (
+                final_state.get("_completion_reason") if ended else "end_reached"
+            ),
+            "output": _extract_outputs(config, final_state),
+        }
+        if include_state:
+            response["state"] = _public_state(final_state)
+
+        logger.info(
+            "run finished",
+            status=response["status"],
+            duration_ms=round((time.perf_counter() - start) * 1000, 2),
+        )
+        return response

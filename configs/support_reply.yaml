@@ -1,0 +1,108 @@
+# A full example flow. It exercises most of the platform:
+#   - sequential stage (classify -> unpack) and a parallel stage (gather)
+#   - both node types (llm + module), with the module emitting correlated logs
+#   - prompts organised in a sub-folder (app/prompts/support/*.md)
+#   - early termination with end_if, and an optional node with when
+#
+# Needs OPENAI_API_KEY to run (the LLM nodes). The e2e tests mock the model.
+id: support_reply
+name: Support Reply Assistant
+route: /agents/support-reply
+
+description: >
+  Triages a customer support message, retrieves relevant policy context,
+  drafts a reply, optionally appends a disclaimer, and polishes the result.
+
+inputs:
+  customer_message:
+    type: string
+    required: true
+  tone:
+    type: string
+    required: false
+    default: empathetic
+  include_disclaimer:
+    type: boolean
+    required: false
+    default: false
+
+outputs:
+  - category
+  - urgency
+  - final_reply
+  - rejection_reason
+
+stages:
+  # Sequential: classify, then parse the classifier output. Stop early if the
+  # message can't be handled automatically.
+  - id: triage
+    parallel: false
+    nodes:
+      - id: classify
+        type: llm
+        model: gpt-4.1-mini
+        temperature: 0
+        prompt_file: support/classify.md      # note the sub-folder
+        output_key: classification
+
+      - id: unpack_triage
+        type: module
+        module: support
+        function: unpack_triage
+        merge_output: true
+        inputs:
+          classification: classification
+
+    end_if:
+      field: can_handle
+      equals: false
+      reason: needs_human
+
+  # Parallel: gather any context the draft will need (one node here, but the
+  # stage is a fan-out point you can add to).
+  - id: gather
+    parallel: true
+    nodes:
+      - id: retrieve_policy
+        type: module
+        module: retrieval
+        function: search
+        inputs:
+          query: customer_message
+        config:
+          top_k: 3
+        output_key: policy_context
+
+  - id: draft
+    parallel: false
+    nodes:
+      - id: draft_reply
+        type: llm
+        model: gpt-4.1-mini
+        temperature: 0.3
+        prompt_file: support/draft.md
+        output_key: draft
+
+  # Optional: only runs when include_disclaimer is true.
+  - id: disclaimer
+    parallel: false
+    nodes:
+      - id: add_disclaimer
+        type: llm
+        when:
+          field: include_disclaimer
+          equals: true
+        model: gpt-4.1-mini
+        temperature: 0.1
+        prompt_file: support/disclaimer.md
+        output_key: disclaimer
+
+  - id: finalize
+    parallel: false
+    nodes:
+      - id: polish_reply
+        type: llm
+        model: gpt-4.1-mini
+        temperature: 0.2
+        prompt_file: support/polish.md
+        output_key: final_reply

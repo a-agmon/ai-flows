@@ -40,6 +40,27 @@ def render_template(template_text: str, state: dict[str, Any]) -> str:
     return _jinja_env.from_string(template_text).render(**state)
 
 
+def message_text(message: Any) -> str:
+    """Extract plain text from a chat-model response.
+
+    Handles both the Chat Completions shape (``content`` is a string) and the
+    Responses API / multimodal shape (``content`` is a list of content blocks),
+    so swapping providers or enabling the Responses API doesn't change behaviour.
+    """
+    content = getattr(message, "content", message)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                parts.append(block.get("text", ""))
+        return "".join(parts)
+    return str(content)
+
+
 def resolve_prompt_path(node_id: str, prompt_file: str) -> Path:
     """Resolve ``prompt_file`` against the prompts dir, rejecting path traversal.
 
@@ -88,10 +109,7 @@ def _create_llm_node(node: LLMNodeConfig) -> NodeFn:
     async def run(state: dict[str, Any]) -> dict[str, Any]:
         prompt = render_template(prompt_text, state)
         response = await llm.ainvoke(prompt)
-        content = response.content
-        if not isinstance(content, str):
-            content = str(content)
-        return {node.output_key: content}
+        return {node.output_key: message_text(response)}
 
     return run
 
@@ -152,43 +170,42 @@ def create_node_fn(node: NodeConfig, *, stage_skip_key: str | None = None) -> No
     async def wrapped(graph_state: dict[str, Any]) -> dict[str, Any]:
         # Unwrap the shared flow state; node authors only ever see this dict.
         state = graph_state[STATE_KEY]
-        run_id = state.get("_run_id")
-        agent_id = state.get("_agent_id")
 
-        stage_skipped = bool(stage_skip_key and state.get(stage_skip_key))
-        node_skipped = node.when is not None and not evaluate_condition(node.when, state)
-        if stage_skipped or node_skipped:
-            logger.info(
-                "node skipped",
-                run_id=run_id, agent_id=agent_id,
-                node_id=node.id, node_type=node.type, status="skipped",
+        # Bind node identity into structlog's contextvars for the duration of the
+        # node. Combined with the run context bound by the runner, every log line
+        # emitted here -- including from inside a module function -- carries
+        # run_id, agent_id, node_id and node_type without passing them around.
+        with structlog.contextvars.bound_contextvars(
+            node_id=node.id, node_type=node.type
+        ):
+            stage_skipped = bool(stage_skip_key and state.get(stage_skip_key))
+            node_skipped = node.when is not None and not evaluate_condition(
+                node.when, state
             )
-            return {STATE_KEY: {}}
+            if stage_skipped or node_skipped:
+                logger.info("node skipped", status="skipped")
+                return {STATE_KEY: {}}
 
-        start = time.perf_counter()
-        try:
-            update = await inner(state)
-        except NodeExecutionError as exc:
-            _log_node(run_id, agent_id, node, start, "failed", exc.message)
-            raise
-        except Exception as exc:  # noqa: BLE001 - normalize any node failure
-            _log_node(run_id, agent_id, node, start, "failed", repr(exc))
-            raise NodeExecutionError(node.id, str(exc) or repr(exc)) from exc
+            start = time.perf_counter()
+            try:
+                update = await inner(state)
+            except NodeExecutionError as exc:
+                _log_node(start, "failed", exc.message)
+                raise
+            except Exception as exc:  # noqa: BLE001 - normalize any node failure
+                _log_node(start, "failed", repr(exc))
+                raise NodeExecutionError(node.id, str(exc) or repr(exc)) from exc
 
-        _log_node(run_id, agent_id, node, start, "ok", None)
-        return {STATE_KEY: update}
+            _log_node(start, "ok", None)
+            return {STATE_KEY: update}
 
     return wrapped
 
 
-def _log_node(run_id, agent_id, node: NodeConfig, start: float,
-              status: str, error: str | None) -> None:
+def _log_node(start: float, status: str, error: str | None) -> None:
+    # node_id / node_type / run_id / agent_id come from bound contextvars.
     logger.info(
         "node executed",
-        run_id=run_id,
-        agent_id=agent_id,
-        node_id=node.id,
-        node_type=node.type,
         duration_ms=round((time.perf_counter() - start) * 1000, 2),
         status=status,
         error=error,

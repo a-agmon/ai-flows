@@ -80,9 +80,10 @@ configured reason, and only the outputs produced so far are returned.
 
 ## Authoring a flow
 
-Drop a `*.yaml` file in `configs/`. See
-[`configs/letter_generation.yaml`](configs/letter_generation.yaml) for a full
-example. Schema summary:
+Drop a `*.yaml` file in `configs/`.
+[`configs/support_reply.yaml`](configs/support_reply.yaml) is the fullest
+example — sequential + parallel stages, LLM + module nodes, `when`, `end_if`,
+folder-nested prompts, and a logging module. Schema summary:
 
 ```yaml
 id: my_flow                 # unique flow id
@@ -107,7 +108,11 @@ stages:
 
 **LLM node** renders a Jinja2 prompt over the current state and calls a model.
 The whole state is available to the template (`{{ some_field }}`). Use either
-`prompt:` (inline) or `prompt_file:` (a file under `app/prompts/`).
+`prompt:` (inline) or `prompt_file:` (a file under `app/prompts/`). Prompt files
+may be organised in **sub-folders**, referenced with a relative path
+(`prompt_file: support/draft.md`); paths that escape the prompts directory are
+rejected at startup. Pick the provider/model per node and use the OpenAI
+Responses API or other vendors — see [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md).
 
 **Module node** calls a Python function from `app/modules/`:
 
@@ -130,6 +135,21 @@ async def assemble_letter(inputs: dict, state: dict, config: dict) -> dict | str
 Return a string (written to `output_key`) or a dict (written to `output_key`,
 or merged into state with `merge_output: true`). Sync functions are supported
 and run in a thread pool.
+
+Modules can log with structlog — just grab a logger:
+
+```python
+import structlog
+log = structlog.get_logger("ai_flows.module.support")
+
+async def unpack_triage(inputs, state, config):
+    log.info("triage parsed", category="billing")   # see app/modules/support.py
+    ...
+```
+
+The runtime binds `run_id`, `agent_id`, `node_id` and `node_type` into
+structlog's contextvars around each node, so module log lines are automatically
+correlated with the run without passing any of that in.
 
 ### Conditions
 
@@ -189,10 +209,11 @@ app/
   errors.py          ConfigError, NodeExecutionError
   config/            Pydantic schema, YAML loader, semantic validator
   graph/             builder, registry, runner, nodes, conditions, state
-  llm/factory.py     provider-agnostic chat-model factory (OpenAI in v1)
-  modules/           user-defined module-node functions
-  prompts/           Jinja2 prompt templates
-configs/             flow YAML files
+  llm/factory.py     provider-agnostic chat-model factory (OpenAI, Anthropic)
+  modules/           user-defined module-node functions (incl. support.py)
+  prompts/           Jinja2 prompt templates (may be nested, e.g. support/)
+configs/             flow YAML files (letter_generation, ocr_summary, support_reply)
+docs/                LLM_PROVIDERS.md and other guides
 tests/               unit + API + end-to-end tests
   configs/           YAML flow used by the e2e tests
 ```
