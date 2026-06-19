@@ -83,7 +83,9 @@ configured reason, and only the outputs produced so far are returned.
 Drop a `*.yaml` file in `configs/`.
 [`configs/support_reply.yaml`](configs/support_reply.yaml) is the fullest
 example — sequential + parallel stages, LLM + module nodes, `when`, `end_if`,
-folder-nested prompts, and a logging module. Schema summary:
+folder-nested prompts, and a logging module. **[EXAMPLE.md](EXAMPLE.md) builds
+that flow step by step** and is the best way to learn how the pieces fit. Schema
+summary:
 
 ```yaml
 id: my_flow                 # unique flow id
