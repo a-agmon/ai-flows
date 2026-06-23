@@ -172,6 +172,132 @@ Operators: `equals`, `not_equals`, `exists`, `contains`, `in`. `field` may use
 dotted paths (`classification.request_status`). Exactly one operator per
 condition.
 
+## State & data flow
+
+Everything in a flow communicates through one shared `state` dict. There are no
+hand-wired edges; a later node sees an earlier node's output simply because that
+output was written into state under some key. The read/write rules below are most
+of what there is to understand.
+
+**Reading state — every node can read all of it.** There is no access
+declaration that limits what a node may read.
+
+- **LLM nodes** have no `inputs` field. The prompt is a Jinja2 template rendered
+  against the *whole* state, so `{{ some_key }}` pulls `some_key` directly. A
+  missing variable raises an error (strict Jinja) rather than rendering blank.
+- **Module nodes** receive the whole state as their `state` argument and may read
+  anything from it. The `inputs:` map is *ergonomic, not an access boundary*: it
+  (a) lets one generic function be reused against different state keys, and
+  (b) fails loudly if a declared key is missing. A function may also reach into
+  `state` directly for ad-hoc reads.
+
+So a node can use a previous node's output **without declaring it** — LLM nodes
+always do (whole-state templating); module nodes can via the `state` arg.
+Declaring `inputs` just buys clarity and a nicer "missing key" error.
+
+**Writing state — the return value is the only sanctioned way to change it.**
+
+- Return a single value → written under the node's `output_key`.
+- Return a dict with `merge_output: true` → each dict key becomes a state key.
+  This is the only way for one node to produce *several* keys. (An `llm` node
+  always produces exactly one string, so multi-key producers must be `module`
+  nodes — or have the LLM emit JSON and a module unpack it, as
+  `unpack_classification` in [`transforms.py`](app/modules/transforms.py) does.)
+- **Do not mutate the `state` dict in place.** It is shared — siblings in a
+  parallel stage see the same object — and in-place writes bypass the reducer, so
+  they do not reliably propagate. Treat `state` as read-only context and express
+  every change through the return value.
+
+**The module function contract is fixed.** A module function is *always* called
+with three dict keyword arguments and returns a single value or a dict:
+
+```python
+async def my_fn(inputs: dict, state: dict, config: dict) -> str | dict:
+    file_url = inputs["file_url"]      # mapped via the YAML `inputs:` map
+    top_k    = config.get("top_k", 3)  # from the node's static `config:` block
+    ...
+```
+
+`inputs` is the mapped `{arg: value}` dict, `state` is the full state, `config`
+is the node's static `config:` block (defaults to `{}`). The engine never unpacks
+scalars for you — you pull individual values out of these dicts yourself. Sync
+functions are supported and run in a thread pool.
+
+**Stage boundaries are barriers.** Every node in a stage completes before any
+node in the next stage starts, and the next stage sees everything prior stages
+wrote. This join is what you rely on to pass data forward.
+
+**Overriding keys is last-writer-wins.** Across stages this is deterministic
+(stages are ordered), so a later stage can overwrite an earlier key. **Within a
+single `parallel: true` stage, nodes must write distinct keys** — sibling updates
+merge in an unspecified order, so two nodes writing the same key is a race. For
+the same reason, don't read a key inside a parallel stage that a sibling in that
+*same* stage is writing; it's only reliably present in the next stage.
+
+**Internal keys.** Keys beginning with `_` (e.g. `_run_id`, `_flow_status`) are
+reserved for flow-control bookkeeping and are stripped from API output. Avoid the
+`_` prefix for your own keys.
+
+## Patterns
+
+**Fan out a task to several nodes.** Put the workers in one `parallel: true`
+stage; its hidden entry fans out to all of them and the next stage joins on all:
+
+```yaml
+- id: draft
+  parallel: true
+  nodes:
+    - { id: write_intro,   type: llm, model: gpt-4.1-mini, prompt_file: intro.md,   output_key: intro_text }
+    - { id: write_body,    type: llm, model: gpt-4.1-mini, prompt_file: body.md,    output_key: body_text }
+    - { id: write_closing, type: llm, model: gpt-4.1-mini, prompt_file: closing.md, output_key: closing_text }
+```
+
+**Pre-process before each fan-out branch.** There is no per-branch chain *inside*
+a parallel stage, and `parallel: false` would serialize the work. Instead use two
+parallel stages paired by key naming — the stage boundary guarantees each
+worker's input exists before it runs:
+
+```yaml
+- id: preprocess          # phase 1: prep every item concurrently
+  parallel: true
+  nodes:
+    - { id: ocr_a, type: module, module: ocr, function: extract_text,
+        output_key: a_text, inputs: { file_url: a_url } }
+    - { id: ocr_b, type: module, module: ocr, function: extract_text,
+        output_key: b_text, inputs: { file_url: b_url } }
+
+- id: summarize           # phase 2: the real fan-out; each reads its own input
+  parallel: true
+  nodes:
+    - { id: sum_a, type: llm, model: gpt-4.1-mini, output_key: a_summary, prompt: "Summarize:\n{{ a_text }}" }
+    - { id: sum_b, type: llm, model: gpt-4.1-mini, output_key: b_summary, prompt: "Summarize:\n{{ b_text }}" }
+```
+
+The `ocr_a → sum_a` link is not an edge — it is just `output_key: a_text`
+matching `{{ a_text }}`.
+
+**One node produces N fields, then fan out on them.** Use a `module` node with
+`merge_output: true` to emit several keys, then a parallel stage whose nodes each
+read one:
+
+```yaml
+- id: split
+  nodes:
+    - { id: make_parts, type: module, module: transforms,
+        function: make_three_parts, merge_output: true }   # -> {part_a, part_b, part_c}
+
+- id: work
+  parallel: true
+  nodes:
+    - { id: work_a, type: llm, model: gpt-4.1-mini, output_key: a, prompt: "...{{ part_a }}..." }
+    - { id: work_b, type: llm, model: gpt-4.1-mini, output_key: b, prompt: "...{{ part_b }}..." }
+    - { id: work_c, type: llm, model: gpt-4.1-mini, output_key: c, prompt: "...{{ part_c }}..." }
+```
+
+> **Fan-out is static.** You declare a fixed set of nodes in YAML; there is no
+> dynamic "map over a list of unknown length" (LangGraph's `Send`). A
+> variable-width fan-out would be a framework change, not a config change.
+
 ## Configuration & logging
 
 All runtime configuration is a Pydantic `Settings` object
@@ -227,5 +353,8 @@ tests/               unit + API + end-to-end tests
 - `when` never alters topology: a node-level `when` is checked inside the node
   function, a stage-level `when` in the stage's entry node. Only `end_if` adds a
   hidden router node, keeping the builder simple.
+- Using `merge_output: true` on any node disables the startup check that every
+  declared `output` is producible — those keys are only known at runtime, so the
+  validator can't verify them statically.
 - Not in v1: arbitrary conditional edges, loops, persistence, streaming,
   per-node retries, runtime-uploaded modules.
