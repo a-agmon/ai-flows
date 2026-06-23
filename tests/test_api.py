@@ -31,11 +31,11 @@ def test_lists_both_flows(client):
 def test_schema_endpoint(client):
     schema = client.get("/agents/letter_generation/schema").json()
     assert schema["route"] == "/agents/letter-generation"
-    assert "user_request" in schema["inputs"]
-    assert schema["inputs"]["user_request"]["required"] is True
+    assert "discharge" in schema["inputs"]
+    assert schema["inputs"]["discharge"]["required"] is True
     assert "final_letter" in schema["outputs"]
     stage_ids = [s["id"] for s in schema["stages"]]
-    assert stage_ids[0] == "classify"
+    assert stage_ids[0] == "write_paragraphs"
 
 
 def test_unknown_agent_404(client):
