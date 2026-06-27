@@ -27,6 +27,12 @@ query: >
 source:
   module: datasource           # -> app/modules/datasource.py
   function: fetch_ticket
+  # Keys the source injects; declared so the no-code UI can introspect them and
+  # the startup output check stays meaningful.
+  outputs: [subject, body, priority, ticket_found]
+  # Optional: skip the fetch (a true bypass) when the caller already supplied the
+  # data directly. Uncomment to make the source a fallback rather than always-run.
+  # when: { field: subject, exists: false }
 
 outputs:
   - subject
