@@ -75,6 +75,8 @@ async def agent_schema(request: Request, agent_id: str) -> dict[str, Any]:
         "inputs": {
             name: spec.model_dump() for name, spec in config.inputs.items()
         },
+        "query": config.query,
+        "source": config.source.model_dump() if config.source else None,
         "outputs": config.outputs,
         "stages": [
             {"id": s.id, "nodes": [n.id for n in s.nodes]} for s in config.stages

@@ -49,7 +49,7 @@ curl localhost:8000/health
 # {"status":"ok"}
 
 curl localhost:8000/agents
-# lists the built-in flows: letter_generation, ocr_summary, support_reply
+# lists the built-in flows: letter_generation, ocr_summary, support_reply, ticket_triage
 ```
 
 `support_reply` is the fullest example flow (folder-nested prompts, a logging
@@ -63,29 +63,32 @@ Inspect a flow's contract first:
 curl localhost:8000/agents/ocr_summary/schema
 ```
 
-`ocr_summary` uses a placeholder OCR module node, so it runs **without an API
-key** (its summarize stage is an LLM node — see the note below):
+`ticket_triage` runs entirely on module nodes, so it works **without an API
+key**. It also shows a flow-level **data source**: you send only a ticket id and
+the flow fetches the ticket itself.
 
 ```bash
-curl -X POST localhost:8000/agents/ocr_summary/invoke \
+curl -X POST localhost:8000/agents/ticket_triage/invoke \
   -H 'content-type: application/json' \
-  -d '{"file_url": "doc://invoice.pdf"}'
+  -d '{"ticket_id": "T-100"}'
+# output includes subject/priority (fetched by the source) and a triage decision
 ```
 
-`letter_generation` is a richer LLM flow (classify → draft → polish) and needs a
-key:
+`letter_generation` is a richer LLM flow (parallel paragraphs → merge →
+guardrail) and needs a key. It takes a `discharge` object:
 
 ```bash
 curl -X POST localhost:8000/agents/letter_generation/invoke \
   -H 'content-type: application/json' \
-  -d '{"user_request": "I want a refund for my delayed order", "tone": "friendly"}'
+  -d '{"discharge": {"patient_name": "Jane Doe", "diagnosis": "...", "hospital_course": "...", "medications": [], "follow_up": [], "attending_physician": "Dr. Smith"}}'
 ```
 
 Add `?include_state=true` to any `invoke` call to see the full final state
 (useful while developing):
 
 ```bash
-curl -X POST 'localhost:8000/agents/letter_generation/invoke?include_state=true' ...
+curl -X POST 'localhost:8000/agents/ticket_triage/invoke?include_state=true' \
+  -H 'content-type: application/json' -d '{"ticket_id": "T-100"}'
 ```
 
 ## 6. Author your first flow (no API key needed)
@@ -173,6 +176,29 @@ The prompt is a Jinja2 template rendered over the whole state, so
 That's the core loop: **drop a YAML file in `configs/`, restart, call the
 endpoint.** Add `when` to skip a node/stage and `end_if` to stop early — see the
 [README](README.md#conditions) for conditions and the module-node contract.
+
+### Let the flow load its own data
+
+Instead of making the caller send everything, a flow can declare a `query` and a
+`source` module that fetches data and injects it into state before the graph runs.
+The caller then sends only a key:
+
+```yaml
+inputs:
+  ticket_id: { type: string, required: true }
+
+query: "SELECT subject, priority FROM tickets WHERE id = '{{ ticket_id }}'"
+
+source:
+  module: datasource          # -> app/modules/datasource.py
+  function: fetch_ticket      # async def fetch_ticket(query, params, config) -> dict
+```
+
+The dict the source returns is merged into state, so later nodes (and prompts) see
+`subject`, `priority`, etc. as if the caller had sent them. And because explicit
+params override source data, a caller can still pass those fields directly to
+bypass the fetch — see [`configs/ticket_triage.yaml`](configs/ticket_triage.yaml)
+and the [Data sources](README.md#data-sources-query--source) section.
 
 ## 7. Run the tests
 

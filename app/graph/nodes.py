@@ -19,7 +19,12 @@ from typing import Any, Awaitable, Callable
 import jinja2
 import structlog
 
-from app.config.models import LLMNodeConfig, ModuleNodeConfig, NodeConfig
+from app.config.models import (
+    LLMNodeConfig,
+    ModuleNodeConfig,
+    NodeConfig,
+    SourceConfig,
+)
 from app.errors import ConfigError, NodeExecutionError
 from app.graph.conditions import evaluate_condition
 from app.graph.state import STATE_KEY
@@ -147,6 +152,40 @@ def _create_module_node(node: ModuleNodeConfig) -> NodeFn:
         return {node.output_key: result}
 
     return run
+
+
+async def run_source(
+    source: SourceConfig, query: str, params: dict[str, Any]
+) -> dict[str, Any]:
+    """Execute a flow-level data source and return the dict it injects into state.
+
+    Runs once before the graph. Mirrors the node wrapper's observability (timing,
+    bound contextvars, error normalization) so a source failure reads like any
+    other runtime failure -- tagged with the synthetic node id ``__source__``.
+    """
+    fn = import_module_function(source.module, source.function)
+    with structlog.contextvars.bound_contextvars(node_id="__source__", node_type="source"):
+        start = time.perf_counter()
+        try:
+            if inspect.iscoroutinefunction(fn):
+                result = await fn(query=query, params=params, config=source.config)
+            else:
+                result = await asyncio.to_thread(
+                    fn, query=query, params=params, config=source.config
+                )
+            if not isinstance(result, dict):
+                raise NodeExecutionError(
+                    "__source__", "source function must return a dict"
+                )
+        except NodeExecutionError as exc:
+            _log_node(start, "failed", exc.message)
+            raise
+        except Exception as exc:  # noqa: BLE001 - normalize any source failure
+            _log_node(start, "failed", repr(exc))
+            raise NodeExecutionError("__source__", str(exc) or repr(exc)) from exc
+
+        _log_node(start, "ok", None)
+        return result
 
 
 def _build_inner(node: NodeConfig) -> NodeFn:

@@ -24,6 +24,7 @@ def validate_flow(config: FlowConfig) -> None:
     _check_unique_stage_ids(config)
     _check_unique_node_ids(config)
     _check_resources_exist(config)
+    _check_source_exists(config)
     _check_outputs_are_producible(config)
 
 
@@ -72,13 +73,27 @@ def _check_resources_exist(config: FlowConfig) -> None:
                 _fail(config, str(exc))
 
 
+def _check_source_exists(config: FlowConfig) -> None:
+    # Resolve the source module/function the same way module nodes are checked,
+    # so a typo in a source fails at startup rather than on the first request.
+    if config.source is None:
+        return
+    try:
+        import_module_function(config.source.module, config.source.function)
+    except ConfigError as exc:
+        _fail(config, str(exc))
+
+
 def _check_outputs_are_producible(config: FlowConfig) -> None:
     """Every declared output should come from a node or a request input.
 
-    ``merge_output`` nodes produce keys that cannot be known statically, so if
-    any are present we skip this check rather than raise false positives.
+    ``merge_output`` nodes and a flow-level ``source`` both produce keys that
+    cannot be known statically, so if either is present we skip this check rather
+    than raise false positives.
     """
-    if any(node.merge_output for _, node in config.iter_nodes()):
+    if config.source is not None or any(
+        node.merge_output for _, node in config.iter_nodes()
+    ):
         return
 
     produced = {node.output_key for _, node in config.iter_nodes() if node.output_key}
