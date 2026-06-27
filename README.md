@@ -14,6 +14,7 @@ Nodes read and write a shared state dict.
 Nodes in a stage run in parallel (or in order with `parallel: false`); the next stage sees everything written before it.
 A node or stage can be skipped with `when`.
 A flow can end early with `end_if`.
+A flow can load its own data from a `query` via a `source` (else data comes in as request params).
 ```
 
 There are no edges to wire by hand: data moves only through shared state.
@@ -55,25 +56,32 @@ nodes run deterministically with no model or API key.
 | `POST /agents/{id}/invoke`             | Run a flow. Body = the input payload.|
 | `POST /agents/{id}/invoke?include_state=true` | Also return the full final state. |
 
-Example:
+Example (the `ticket_triage` flow runs without an API key):
 
 ```bash
-curl -X POST localhost:8000/agents/letter_generation/invoke \
+curl -X POST localhost:8000/agents/ticket_triage/invoke \
   -H 'content-type: application/json' \
-  -d '{"user_request": "I want a refund for my delayed order", "tone": "friendly"}'
+  -d '{"ticket_id": "T-100"}'
 ```
 
 Response:
 
 ```json
 {
-  "agent_id": "letter_generation",
+  "agent_id": "ticket_triage",
   "run_id": "…",
   "status": "completed",
   "completion_reason": "end_reached",
-  "output": { "final_letter": "…", "request_status": "supported", "rejection_reason": null }
+  "output": {
+    "subject": "Refund for a delayed order",
+    "priority": "high",
+    "triage": { "priority": "high", "queue": "urgent" }
+  }
 }
 ```
+
+The caller sent only a ticket id — `subject` and `priority` were pulled in by the
+flow's data **source** (see [Data sources](#data-sources-query--source) below).
 
 If a stage's `end_if` fires, `status` is `"ended"`, `completion_reason` is the
 configured reason, and only the outputs produced so far are returned.
@@ -93,6 +101,9 @@ route: /agents/my-flow      # unique route
 inputs:
   some_field: { type: string, required: true }
   tone:       { type: string, required: false, default: professional }
+# Optional: load data into the flow instead of requiring it all as params.
+# query: "..."              # see "Data sources" below
+# source: { module: datasource, function: fetch_ticket }
 outputs: [final_text]       # keys returned to the caller (if present)
 stages:
   - id: draft
@@ -171,6 +182,55 @@ end_if:                # on a stage: stop the flow after the stage if true
 Operators: `equals`, `not_equals`, `exists`, `contains`, `in`. `field` may use
 dotted paths (`classification.request_status`). Exactly one operator per
 condition.
+
+### Data sources (`query` + `source`)
+
+Two ways to get data into a flow:
+
+1. **As request params.** The caller sends everything in the request body; the
+   values land in state under their input names. This is the default and is all
+   an external system that already holds the data needs.
+2. **Via a data source.** The flow declares a `query` and a flow-level `source`
+   module that runs the query and **injects the result into state before the
+   graph starts**. The caller then sends only a key (an id, a search term) and
+   the flow fetches the rest itself — handy for no-code flows and for keeping
+   large records out of the request.
+
+```yaml
+inputs:
+  ticket_id: { type: string, required: true }
+
+query: >                       # a Jinja2 template, rendered over the params
+  SELECT subject, body, priority FROM tickets WHERE id = '{{ ticket_id }}'
+
+source:
+  module: datasource           # -> app/modules/datasource.py
+  function: fetch_ticket
+  config: { }                  # optional static config (dsn, index name, ...)
+```
+
+A source function has its own contract (it gets the rendered `query`, not an
+`inputs` map) and returns a dict that is merged into state:
+
+```python
+async def fetch_ticket(query: str, params: dict, config: dict) -> dict:
+    ...
+    return {"subject": "...", "priority": "high"}   # merged into state
+```
+
+**The two modes compose.** State is layered so explicit caller params always win:
+
+```
+defaults  <  source-injected data  <  request payload
+```
+
+So a flow that *has* a source can still accept the same data directly as a param
+— the caller's value overrides what the source would fetch. That makes the source
+a default, not a requirement: pass `ticket_id` and it's fetched; pass the fields
+directly and the fetch is bypassed. Useful for testing, previews, and callers
+that already have the record. A `query` without a `source` to run it is a config
+error; a `source` may omit `query` if the function works from `params`/`config`
+alone. See [`configs/ticket_triage.yaml`](configs/ticket_triage.yaml).
 
 ## State & data flow
 
@@ -338,9 +398,9 @@ app/
   config/            Pydantic schema, YAML loader, semantic validator
   graph/             builder, registry, runner, nodes, conditions, state
   llm/factory.py     provider-agnostic chat-model factory (OpenAI, Anthropic)
-  modules/           user-defined module-node functions (incl. support.py)
+  modules/           user-defined module-node + data-source functions (support.py, datasource.py)
   prompts/           Jinja2 prompt templates (may be nested, e.g. support/)
-configs/             flow YAML files (letter_generation, ocr_summary, support_reply)
+configs/             flow YAML files (letter_generation, ocr_summary, support_reply, ticket_triage)
 docs/                LLM_PROVIDERS.md and other guides
 tests/               unit + API + end-to-end tests
   configs/           YAML flow used by the e2e tests
@@ -353,8 +413,16 @@ tests/               unit + API + end-to-end tests
 - `when` never alters topology: a node-level `when` is checked inside the node
   function, a stage-level `when` in the stage's entry node. Only `end_if` adds a
   hidden router node, keeping the builder simple.
-- Using `merge_output: true` on any node disables the startup check that every
-  declared `output` is producible — those keys are only known at runtime, so the
-  validator can't verify them statically.
+- Using `merge_output: true` on any node, or a flow-level `source`, disables the
+  startup check that every declared `output` is producible — those keys are only
+  known at runtime, so the validator can't verify them statically.
+- A `source` runs once before the graph. It is validated at startup (module and
+  function must import) and its failures surface like a node failure, tagged with
+  the synthetic id `__source__`.
+- `route` is metadata (it must be unique and is returned by `/schema`), but flows
+  are always invoked at `/agents/{id}/invoke` — the `route` value does not change
+  the HTTP path today.
+- Input `type` is declared for documentation and tooling; the runtime enforces
+  `required` but does not yet coerce or validate values against `type`.
 - Not in v1: arbitrary conditional edges, loops, persistence, streaming,
   per-node retries, runtime-uploaded modules.

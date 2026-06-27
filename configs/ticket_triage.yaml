@@ -1,0 +1,45 @@
+# Demonstrates a flow-level data SOURCE. The caller sends only a ticket id; the
+# flow fetches the ticket itself via `query` + `source` and triages it. No LLM
+# nodes, so it runs without an API key.
+#
+# Because source data is overridden by explicit request params, you can also call
+# this flow with the ticket fields supplied directly (e.g. {"ticket_id": "x",
+# "priority": "high", "ticket_found": true}) to bypass the lookup.
+id: ticket_triage
+name: Ticket Triage
+route: /agents/ticket-triage
+
+description: >
+  Loads a support ticket by id through a flow-level data source, then routes it to
+  a queue based on its priority. Shows query/source data injection.
+
+inputs:
+  ticket_id:
+    type: string
+    required: true
+
+# A Jinja2 template rendered over the request params. A real source would run
+# this against a datastore; the placeholder just logs it and looks the id up.
+query: >
+  SELECT subject, body, priority FROM tickets WHERE id = '{{ ticket_id }}'
+
+# The module that consumes the query and injects data into the flow state.
+source:
+  module: datasource           # -> app/modules/datasource.py
+  function: fetch_ticket
+
+outputs:
+  - subject
+  - priority
+  - triage
+
+stages:
+  - id: route
+    nodes:
+      - id: triage
+        type: module
+        module: datasource
+        function: triage_ticket
+        merge_output: true          # -> {triage: {...}}
+        inputs:
+          found: ticket_found

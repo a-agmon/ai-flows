@@ -119,6 +119,25 @@ NodeConfig = Annotated[
 ]
 
 
+class SourceConfig(_Strict):
+    """A flow-level data source: a module that loads data into the flow.
+
+    A source runs once, before the graph, and returns a dict that is merged into
+    the initial state. It is how a flow can fetch its own data from a ``query``
+    instead of requiring the caller to pass everything as request params. The
+    function contract differs from a module *node* -- a source receives the
+    rendered ``query`` rather than an ``inputs`` map:
+
+        async def load(query: str, params: dict, config: dict) -> dict: ...
+    """
+
+    module: str
+    function: str
+    # Static per-source configuration, passed through to the function (e.g. a
+    # connection string, an index name). Defaults to an empty dict.
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
 class StageConfig(_Strict):
     """An ordered group of nodes.
 
@@ -148,6 +167,12 @@ class FlowConfig(_Strict):
     name: str | None = None
     description: str | None = None
     inputs: dict[str, InputSpec] = Field(default_factory=dict)
+    # A flow-level data source. ``query`` is a Jinja2 template rendered over the
+    # request params, then handed to ``source`` to inject data into the flow.
+    # Both are optional, but a ``query`` is meaningless without a ``source`` to
+    # run it (see the validator below).
+    query: str | None = None
+    source: SourceConfig | None = None
     outputs: list[str] = Field(default_factory=list)
     stages: list[StageConfig]
 
@@ -155,6 +180,14 @@ class FlowConfig(_Strict):
     def _has_stages(self) -> FlowConfig:
         if not self.stages:
             raise ValueError(f"flow '{self.id}' must contain at least one stage")
+        return self
+
+    @model_validator(mode="after")
+    def _query_needs_source(self) -> FlowConfig:
+        if self.query is not None and self.source is None:
+            raise ValueError(
+                f"flow '{self.id}' sets 'query' but no 'source' to execute it"
+            )
         return self
 
     def iter_nodes(self):

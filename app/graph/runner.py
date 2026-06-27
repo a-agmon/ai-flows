@@ -9,6 +9,7 @@ from typing import Any
 import structlog
 
 from app.config.models import FlowConfig
+from app.graph.nodes import render_template, run_source
 from app.graph.registry import RegisteredFlow
 from app.graph.state import unwrap, wrap
 
@@ -22,13 +23,30 @@ class InputValidationError(Exception):
     """Raised when a request payload does not satisfy the flow's inputs."""
 
 
-def build_initial_state(
+def _defaults(config: FlowConfig) -> dict[str, Any]:
+    return {
+        name: spec.default
+        for name, spec in config.inputs.items()
+        if spec.default is not None
+    }
+
+
+async def build_initial_state(
     config: FlowConfig, payload: dict[str, Any], run_id: str
 ) -> dict[str, Any]:
-    """Validate the payload and merge it with declared defaults.
+    """Validate the payload, run the flow's data source, and seed the state.
+
+    The initial state is layered so explicit caller params always win:
+
+        defaults  <  source-injected data  <  request payload
+
+    This is what lets a flow with a ``source`` *also* accept the data directly as
+    a param -- the caller can supply a value to override what the source would
+    fetch (useful for external systems that already hold the data, and for tests).
 
     Raises:
         InputValidationError: if a required input is missing.
+        NodeExecutionError: if the data source fails.
     """
     if not isinstance(payload, dict):
         raise InputValidationError("request body must be a JSON object")
@@ -41,13 +59,18 @@ def build_initial_state(
     if missing:
         raise InputValidationError(f"missing required input(s): {', '.join(missing)}")
 
-    state: dict[str, Any] = {}
-    for name, spec in config.inputs.items():
-        if spec.default is not None:
-            state[name] = spec.default
-    # Caller-provided values win over defaults; unknown keys pass through so
-    # flows can accept ad-hoc context without re-declaring every field.
-    state.update(payload)
+    defaults = _defaults(config)
+    # The params the source sees (and the query is rendered against): defaults
+    # overlaid by the caller's payload. Unknown keys pass through so flows can
+    # accept ad-hoc context without re-declaring every field.
+    params = {**defaults, **payload}
+
+    if config.source is not None:
+        query = render_template(config.query, params) if config.query else ""
+        loaded = await run_source(config.source, query, params)
+        state = {**defaults, **loaded, **payload}
+    else:
+        state = params
 
     state["_run_id"] = run_id
     state["_agent_id"] = config.id
@@ -75,7 +98,6 @@ async def run_flow(
     """Run a flow end to end and build the API response body."""
     config = entry.config
     run_id = str(uuid.uuid4())
-    initial_state = build_initial_state(config, payload, run_id)
     start = time.perf_counter()
 
     # Bind run context for the whole run. asyncio copies contextvars into the
@@ -83,6 +105,8 @@ async def run_flow(
     # agent_id automatically (the merge_contextvars processor renders them).
     with structlog.contextvars.bound_contextvars(run_id=run_id, agent_id=config.id):
         logger.info("run started", version=entry.version)
+
+        initial_state = await build_initial_state(config, payload, run_id)
 
         final_state: dict[str, Any] = unwrap(
             await entry.graph.ainvoke(wrap(initial_state))
