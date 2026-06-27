@@ -72,6 +72,78 @@ async def test_source_not_found_path():
     assert result["output"]["triage"] == {"queue": "not_found"}
 
 
+async def test_source_when_guard_bypasses_the_fetch():
+    """With a `when` guard, supplying the data directly skips the source entirely
+    -- the function is never called (no latency, no dependency on the store)."""
+    flow = {
+        **FLOW,
+        "source": {
+            "module": "datasource",
+            "function": "fetch_ticket",
+            "when": {"field": "subject", "exists": False},
+        },
+    }
+    config = FlowConfig.model_validate(flow)
+
+    import app.graph.nodes as nodes
+
+    calls = {"n": 0}
+
+    async def spy(query, params, config):
+        calls["n"] += 1
+        return {"ticket_found": True, "subject": "FETCHED"}
+
+    original = nodes.import_module_function
+    nodes.import_module_function = lambda module, function: spy
+    try:
+        # subject supplied -> guard false -> source must not run.
+        state = await build_initial_state(
+            config, {"ticket_id": "missing", "subject": "GIVEN"}, "r1"
+        )
+        assert calls["n"] == 0
+        assert state["subject"] == "GIVEN"
+
+        # subject absent -> guard true -> source runs and fills it in.
+        state = await build_initial_state(config, {"ticket_id": "T-100"}, "r2")
+        assert calls["n"] == 1
+        assert state["subject"] == "FETCHED"
+    finally:
+        nodes.import_module_function = original
+
+
+def test_declared_source_outputs_keep_output_check_on():
+    """A source that declares its outputs still gets its node outputs validated:
+    an output produced by neither a node, an input, nor the source is rejected."""
+    bad = {
+        **FLOW,
+        "source": {
+            "module": "datasource",
+            "function": "fetch_ticket",
+            "outputs": ["subject", "priority"],
+        },
+        "outputs": ["subject", "nonexistent"],
+        # Replace the merge_output node (which would disable the check) with a
+        # plain output_key node.
+        "stages": [
+            {
+                "id": "route",
+                "nodes": [
+                    {
+                        "id": "triage",
+                        "type": "module",
+                        "module": "datasource",
+                        "function": "triage_ticket",
+                        "output_key": "triage",
+                        "inputs": {"found": "ticket_found"},
+                    }
+                ],
+            }
+        ],
+    }
+    with pytest.raises(ConfigError, match="not produced"):
+        validate_flow(FlowConfig.model_validate(bad))
+
+
 async def test_query_is_rendered_over_params():
     """The query template is rendered against params before reaching the source."""
     config = FlowConfig.model_validate(FLOW)

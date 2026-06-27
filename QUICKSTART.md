@@ -195,10 +195,11 @@ source:
 ```
 
 The dict the source returns is merged into state, so later nodes (and prompts) see
-`subject`, `priority`, etc. as if the caller had sent them. And because explicit
-params override source data, a caller can still pass those fields directly to
-bypass the fetch — see [`configs/ticket_triage.yaml`](configs/ticket_triage.yaml)
-and the [Data sources](README.md#data-sources-query--source) section.
+`subject`, `priority`, etc. as if the caller had sent them. By default the source
+runs every request and explicit params win on the merge; add a `when` guard to the
+source to skip the fetch entirely when the caller supplies the data directly. See
+[`configs/ticket_triage.yaml`](configs/ticket_triage.yaml) and the
+[Data sources](README.md#data-sources-query--source) section.
 
 ## 7. Run the tests
 

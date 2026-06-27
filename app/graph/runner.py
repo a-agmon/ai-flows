@@ -9,6 +9,7 @@ from typing import Any
 import structlog
 
 from app.config.models import FlowConfig
+from app.graph.conditions import evaluate_condition
 from app.graph.nodes import render_template, run_source
 from app.graph.registry import RegisteredFlow
 from app.graph.state import unwrap, wrap
@@ -40,9 +41,11 @@ async def build_initial_state(
 
         defaults  <  source-injected data  <  request payload
 
-    This is what lets a flow with a ``source`` *also* accept the data directly as
-    a param -- the caller can supply a value to override what the source would
-    fetch (useful for external systems that already hold the data, and for tests).
+    So a flow with a ``source`` can still accept the data directly as a param --
+    the caller's value overrides what the source fetched. The source runs on
+    every request unless it declares a ``when`` guard that evaluates false against
+    the params, in which case the fetch is skipped entirely (a true bypass, with
+    no source latency or dependency).
 
     Raises:
         InputValidationError: if a required input is missing.
@@ -65,11 +68,16 @@ async def build_initial_state(
     # accept ad-hoc context without re-declaring every field.
     params = {**defaults, **payload}
 
-    if config.source is not None:
+    source = config.source
+    if source is not None and (
+        source.when is None or evaluate_condition(source.when, params)
+    ):
         query = render_template(config.query, params) if config.query else ""
-        loaded = await run_source(config.source, query, params)
+        loaded = await run_source(source, query, params)
         state = {**defaults, **loaded, **payload}
     else:
+        if source is not None:
+            logger.info("source skipped", reason="when_guard_false")
         state = params
 
     state["_run_id"] = run_id

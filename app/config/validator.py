@@ -85,23 +85,25 @@ def _check_source_exists(config: FlowConfig) -> None:
 
 
 def _check_outputs_are_producible(config: FlowConfig) -> None:
-    """Every declared output should come from a node or a request input.
+    """Every declared output should come from a node, a request input, or a source.
 
-    ``merge_output`` nodes and a flow-level ``source`` both produce keys that
-    cannot be known statically, so if either is present we skip this check rather
-    than raise false positives.
+    Some producers are statically unknown: ``merge_output`` nodes emit dynamic
+    keys, and a ``source`` may too. We skip the check only when such a producer
+    leaves the output set unknowable -- a source that *declares* its ``outputs``
+    keeps the check on, so node-produced outputs (and typos) are still caught.
     """
-    if config.source is not None or any(
-        node.merge_output for _, node in config.iter_nodes()
-    ):
+    if any(node.merge_output for _, node in config.iter_nodes()):
+        return
+    if config.source is not None and not config.source.outputs:
         return
 
     produced = {node.output_key for _, node in config.iter_nodes() if node.output_key}
-    available = produced | set(config.inputs)
+    source_outputs = set(config.source.outputs) if config.source else set()
+    available = produced | set(config.inputs) | source_outputs
     for output in config.outputs:
         if output not in available:
             _fail(
                 config,
-                f"declared output '{output}' is not produced by any node "
-                "and is not a request input",
+                f"declared output '{output}' is not produced by any node, "
+                "request input, or source",
             )

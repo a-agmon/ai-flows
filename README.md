@@ -207,6 +207,8 @@ source:
   module: datasource           # -> app/modules/datasource.py
   function: fetch_ticket
   config: { }                  # optional static config (dsn, index name, ...)
+  outputs: [subject, body, priority]   # optional: keys it injects (see below)
+  # when: { field: subject, exists: false }   # optional: skip the fetch (below)
 ```
 
 A source function has its own contract (it gets the rendered `query`, not an
@@ -225,12 +227,29 @@ defaults  <  source-injected data  <  request payload
 ```
 
 So a flow that *has* a source can still accept the same data directly as a param
-— the caller's value overrides what the source would fetch. That makes the source
-a default, not a requirement: pass `ticket_id` and it's fetched; pass the fields
-directly and the fetch is bypassed. Useful for testing, previews, and callers
-that already have the record. A `query` without a `source` to run it is a config
-error; a `source` may omit `query` if the function works from `params`/`config`
-alone. See [`configs/ticket_triage.yaml`](configs/ticket_triage.yaml).
+— the caller's value overrides what the source fetched. By default **the source
+runs on every request** and the payload simply wins on the merge.
+
+**Bypassing the fetch entirely.** If you want a caller-supplied payload to *skip*
+the source — no fetch latency, no dependency on the backing store — give the
+source a `when` guard (the same condition syntax as nodes/stages), evaluated
+against the request params. When it is false the source is not called at all:
+
+```yaml
+source:
+  module: datasource
+  function: fetch_ticket
+  when: { field: subject, exists: false }   # only fetch when subject wasn't supplied
+```
+
+**Declaring `outputs`.** A source's keys are dynamic, so by default a flow with a
+source is exempt from the startup "outputs are producible" check. List the keys
+the source injects under `source.outputs` to keep that check on (node-produced
+outputs and typos are still caught) and to let no-code UIs introspect the source.
+
+A `query` without a `source` to run it is a config error; a `source` may omit
+`query` if the function works from `params`/`config` alone. See
+[`configs/ticket_triage.yaml`](configs/ticket_triage.yaml).
 
 ## State & data flow
 
@@ -413,12 +432,13 @@ tests/               unit + API + end-to-end tests
 - `when` never alters topology: a node-level `when` is checked inside the node
   function, a stage-level `when` in the stage's entry node. Only `end_if` adds a
   hidden router node, keeping the builder simple.
-- Using `merge_output: true` on any node, or a flow-level `source`, disables the
-  startup check that every declared `output` is producible — those keys are only
-  known at runtime, so the validator can't verify them statically.
-- A `source` runs once before the graph. It is validated at startup (module and
-  function must import) and its failures surface like a node failure, tagged with
-  the synthetic id `__source__`.
+- Using `merge_output: true` on any node disables the startup check that every
+  declared `output` is producible — those keys are only known at runtime. A
+  flow-level `source` does the same *unless* it declares `source.outputs`, which
+  re-enables the check using the declared keys.
+- A `source` runs once before the graph (unless its `when` guard is false). It is
+  validated at startup (module and function must import) and its failures surface
+  like a node failure, tagged with the synthetic id `__source__`.
 - `route` is metadata (it must be unique and is returned by `/schema`), but flows
   are always invoked at `/agents/{id}/invoke` — the `route` value does not change
   the HTTP path today.

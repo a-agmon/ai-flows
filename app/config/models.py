@@ -136,6 +136,16 @@ class SourceConfig(_Strict):
     # Static per-source configuration, passed through to the function (e.g. a
     # connection string, an index name). Defaults to an empty dict.
     config: dict[str, Any] = Field(default_factory=dict)
+    # Optional guard, evaluated against the request params. When set and false,
+    # the source is *not* run at all -- this is how a caller bypasses the fetch
+    # by supplying the data directly (e.g. ``when: {field: subject, exists: false}``
+    # skips the fetch whenever ``subject`` is already in the payload).
+    when: ConditionConfig | None = None
+    # Keys this source injects into state. Optional: when declared they are fed
+    # into the startup "outputs are producible" check, so a flow with a source
+    # still has its node-produced outputs validated. Omit for a source whose
+    # output keys are not known statically.
+    outputs: list[str] = Field(default_factory=list)
 
 
 class StageConfig(_Strict):
